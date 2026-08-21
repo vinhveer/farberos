@@ -111,6 +111,7 @@ class DINOv3Inference:
         self,
         images: ImageInput | Sequence[ImageInput],
         *,
+        image_size: int | None = None,
         return_patches: bool = False,
         normalize: bool | None = None,
         as_numpy: bool = False,
@@ -128,7 +129,15 @@ class DINOv3Inference:
             raise ValueError("images must contain at least one image")
         batch = [self._load_image(image) for image in batch]
 
-        inputs = self.processor(images=batch, return_tensors="pt")
+        processor_kwargs: dict[str, Any] = {}
+        if image_size is not None:
+            target_size = {"height": image_size, "width": image_size}
+            processor_kwargs.update(size=target_size, crop_size=target_size)
+        inputs = self.processor(
+            images=batch,
+            return_tensors="pt",
+            **processor_kwargs,
+        )
         inputs = {
             key: value.to(device=self.device, dtype=self.dtype)
             if torch.is_floating_point(value)

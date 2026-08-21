@@ -49,6 +49,12 @@ class ExtractDINOv3Command:
             help="Number of images per GPU inference batch for folder input (default: 8)",
         )
         parser.add_argument(
+            "--image-size",
+            type=int,
+            default=512,
+            help="Square input resolution; must be divisible by 16 (default: 512)",
+        )
+        parser.add_argument(
             "--no-normalize",
             action="store_true",
             help="Do not L2-normalize the embedding",
@@ -74,6 +80,8 @@ class ExtractDINOv3Command:
             raise FileNotFoundError(f"Không tìm thấy input: {source}")
         if args.batch_size < 1:
             raise ValueError("--batch-size phải lớn hơn hoặc bằng 1")
+        if args.image_size < 16 or args.image_size % 16:
+            raise ValueError("--image-size phải lớn hơn hoặc bằng 16 và chia hết cho 16")
 
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
         rank = int(os.environ.get("RANK", "0"))
@@ -137,6 +145,7 @@ class ExtractDINOv3Command:
                 source_root=source,
                 feature_root=feature_root,
                 map_root=map_root,
+                image_size=args.image_size,
             )
 
         print(
@@ -156,11 +165,13 @@ class ExtractDINOv3Command:
         source_root: Path,
         feature_root: Path,
         map_root: Path | None,
+        image_size: int,
     ) -> None:
         import numpy as np
 
         result = inference.predict(
             images,
+            image_size=image_size,
             return_patches=map_root is not None,
             as_numpy=True,
         )
@@ -193,6 +204,7 @@ class ExtractDINOv3Command:
                     output=map_path,
                     global_feature=result.embeddings[index],
                     patch_features=result.patch_embeddings[index],
+                    image_size=image_size,
                 )
 
     @classmethod
@@ -216,6 +228,7 @@ class ExtractDINOv3Command:
                 image,
                 feature_path=feature_path,
                 map_path=map_path,
+                image_size=args.image_size,
             )
             print(f"Đã lưu đặc trưng {feature.shape} vào: {feature_path}")
         else:
@@ -224,6 +237,7 @@ class ExtractDINOv3Command:
                 image,
                 feature_path=None,
                 map_path=map_path,
+                image_size=args.image_size,
             )
             print(
                 json.dumps(
@@ -248,9 +262,11 @@ class ExtractDINOv3Command:
         *,
         feature_path: Path | None,
         map_path: Path | None,
+        image_size: int,
     ) -> object:
         result = inference.predict(
             image,
+            image_size=image_size,
             return_patches=map_path is not None,
             as_numpy=True,
         )
@@ -277,6 +293,7 @@ class ExtractDINOv3Command:
                 output=map_path,
                 global_feature=feature,
                 patch_features=result.patch_embeddings[0],
+                image_size=image_size,
             )
         return feature
 
@@ -297,6 +314,7 @@ class ExtractDINOv3Command:
         output: Path,
         global_feature: object,
         patch_features: object,
+        image_size: int,
     ) -> None:
         """Render cosine similarity between each patch and the global token."""
         import numpy as np
@@ -329,8 +347,10 @@ class ExtractDINOv3Command:
         colours = stops[left] * (1.0 - weight) + stops[right] * weight
 
         with Image.open(image) as source:
-            original = source.convert("RGB")
             resampling = getattr(Image, "Resampling", Image)
+            original = source.convert("RGB").resize(
+                (image_size, image_size), resample=resampling.BICUBIC
+            )
             heatmap = Image.fromarray(colours.astype(np.uint8), mode="RGB").resize(
                 original.size, resample=resampling.BICUBIC
             )
