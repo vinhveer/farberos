@@ -230,7 +230,6 @@ class ExtractDINOv3Command:
                 cls._save_feature_map(
                     image=image,
                     output=map_path,
-                    global_feature=result.embeddings[index],
                     patch_features=result.patch_embeddings[index],
                     image_size=image_size,
                 )
@@ -346,7 +345,6 @@ class ExtractDINOv3Command:
             cls._save_feature_map(
                 image=image,
                 output=map_path,
-                global_feature=feature,
                 patch_features=result.patch_embeddings[0],
                 image_size=image_size,
             )
@@ -367,47 +365,55 @@ class ExtractDINOv3Command:
         *,
         image: Path,
         output: Path,
-        global_feature: object,
         patch_features: object,
         image_size: int,
     ) -> None:
-        """Render cosine similarity between each patch and the global token."""
+        """Render dense patch embeddings as an RGB PCA feature map."""
         import numpy as np
         from PIL import Image
 
         patches = np.asarray(patch_features, dtype=np.float32)
-        global_vector = np.asarray(global_feature, dtype=np.float32)
-        patches /= np.maximum(np.linalg.norm(patches, axis=-1, keepdims=True), 1e-12)
-        global_vector /= max(float(np.linalg.norm(global_vector)), 1e-12)
-        scores = patches @ global_vector
-
-        patch_count = scores.shape[0]
+        patches -= patches.mean(axis=0, keepdims=True)
+        patch_count = patches.shape[0]
         grid_height = int(round(patch_count**0.5))
         while grid_height > 1 and patch_count % grid_height:
             grid_height -= 1
         grid_width = patch_count // grid_height
-        heat = scores.reshape(grid_height, grid_width)
-        low, high = np.percentile(heat, [5, 95])
-        heat = np.clip((heat - low) / max(high - low, 1e-6), 0.0, 1.0)
 
-        # Compact blue -> cyan -> yellow -> red colour map.
-        stops = np.array(
-            [[20, 35, 120], [20, 190, 220], [250, 220, 40], [220, 35, 25]],
-            dtype=np.float32,
+        # Randomized PCA keeps this practical for 4096 patches from 1024px input.
+        try:
+            from sklearn.decomposition import PCA
+
+            colours = PCA(
+                n_components=3,
+                svd_solver="randomized",
+                random_state=0,
+            ).fit_transform(patches)
+        except ImportError:
+            # NumPy-only fallback; exact SVD is slower but has no extra dependency.
+            left_vectors, singular_values, _ = np.linalg.svd(
+                patches, full_matrices=False
+            )
+            colours = left_vectors[:, :3] * singular_values[:3]
+
+        # Robust per-channel scaling prevents a few extreme patches washing out
+        # the spatial structure in the rest of the image.
+        low = np.percentile(colours, 1, axis=0, keepdims=True)
+        high = np.percentile(colours, 99, axis=0, keepdims=True)
+        colours = np.clip((colours - low) / np.maximum(high - low, 1e-6), 0, 1)
+        colours = (colours.reshape(grid_height, grid_width, 3) * 255).astype(
+            np.uint8
         )
-        position = heat * (len(stops) - 1)
-        left = np.floor(position).astype(int)
-        right = np.minimum(left + 1, len(stops) - 1)
-        weight = (position - left)[..., None]
-        colours = stops[left] * (1.0 - weight) + stops[right] * weight
 
         with Image.open(image) as source:
             resampling = getattr(Image, "Resampling", Image)
             original = source.convert("RGB").resize(
                 (image_size, image_size), resample=resampling.BICUBIC
             )
-            heatmap = Image.fromarray(colours.astype(np.uint8), mode="RGB").resize(
-                original.size, resample=resampling.BICUBIC
+            feature_map = Image.fromarray(colours, mode="RGB").resize(
+                original.size, resample=resampling.NEAREST
             )
-            overlay = Image.blend(original, heatmap, alpha=0.45)
-            overlay.save(output, quality=95)
+            comparison = Image.new("RGB", (image_size * 2, image_size))
+            comparison.paste(original, (0, 0))
+            comparison.paste(feature_map, (image_size, 0))
+            comparison.save(output, quality=95)
