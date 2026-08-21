@@ -36,6 +36,12 @@ class ExtractDINOv3Command:
             help="Inference device (default: auto)",
         )
         parser.add_argument(
+            "--dtype",
+            default="float32",
+            choices=("float32", "float16"),
+            help="Model precision; float32 is safer for feature maps (default: float32)",
+        )
+        parser.add_argument(
             "--no-normalize",
             action="store_true",
             help="Do not L2-normalize the embedding",
@@ -54,6 +60,8 @@ class ExtractDINOv3Command:
 
     @classmethod
     def run(cls, args: argparse.Namespace) -> int:
+        import torch
+
         source = args.input.expanduser()
         if not source.exists():
             raise FileNotFoundError(f"Không tìm thấy input: {source}")
@@ -61,6 +69,7 @@ class ExtractDINOv3Command:
         inference = DINOv3Inference(
             model_name=args.model,
             device=args.device,
+            dtype=getattr(torch, args.dtype),
             normalize=not args.no_normalize,
         )
         if source.is_file():
@@ -168,9 +177,19 @@ class ExtractDINOv3Command:
             as_numpy=True,
         )
         feature = result.embeddings[0]
-        if feature_path is not None:
-            import numpy as np
+        import numpy as np
 
+        if not np.isfinite(feature).all():
+            raise RuntimeError(
+                "Model trả về embedding có NaN/Inf. Hãy chạy lại với "
+                "--dtype float32; nếu vẫn lỗi, dùng model nhỏ hơn."
+            )
+        if map_path is not None and not np.isfinite(result.patch_embeddings).all():
+            raise RuntimeError(
+                "Model trả về patch features có NaN/Inf. Hãy chạy lại với "
+                "--dtype float32; nếu vẫn lỗi, dùng model nhỏ hơn."
+            )
+        if feature_path is not None:
             feature_path.parent.mkdir(parents=True, exist_ok=True)
             np.save(feature_path, feature)
         if map_path is not None:

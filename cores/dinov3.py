@@ -36,8 +36,8 @@ class DINOv3Inference:
     Args:
         model_name: Hugging Face model id or a local model directory.
         device: ``"cuda"``, ``"mps"``, ``"cpu"`` or ``"auto"``.
-        dtype: Optional torch dtype. When omitted, float16 is used on CUDA and
-            float32 elsewhere.
+        dtype: Optional torch dtype. When omitted, float32 is used for stable
+            feature extraction and visualization on every device.
         normalize: L2-normalize output features by default.
         local_files_only: Never contact the Hub; useful for offline inference.
 
@@ -66,9 +66,7 @@ class DINOv3Inference:
 
         self._torch = torch
         self.device = self._resolve_device(device)
-        self.dtype = dtype or (
-            torch.float16 if self.device.type == "cuda" else torch.float32
-        )
+        self.dtype = dtype or torch.float32
         self.normalize = normalize
         model_ref = str(model_name)
 
