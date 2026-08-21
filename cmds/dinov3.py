@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -42,6 +43,12 @@ class ExtractDINOv3Command:
             help="Model precision; float32 is safer for feature maps (default: float32)",
         )
         parser.add_argument(
+            "--batch-size",
+            type=int,
+            default=8,
+            help="Number of images per GPU inference batch for folder input (default: 8)",
+        )
+        parser.add_argument(
             "--no-normalize",
             action="store_true",
             help="Do not L2-normalize the embedding",
@@ -65,10 +72,26 @@ class ExtractDINOv3Command:
         source = args.input.expanduser()
         if not source.exists():
             raise FileNotFoundError(f"Không tìm thấy input: {source}")
+        if args.batch_size < 1:
+            raise ValueError("--batch-size phải lớn hơn hoặc bằng 1")
+
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        rank = int(os.environ.get("RANK", "0"))
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if world_size > 1 and source.is_file():
+            raise ValueError("torchrun chỉ hỗ trợ folder input, không hỗ trợ một ảnh")
+        device = args.device
+        if world_size > 1:
+            if device not in {"auto", "cuda"}:
+                raise ValueError("torchrun yêu cầu --device cuda hoặc auto")
+            if not torch.cuda.is_available():
+                raise RuntimeError("torchrun được bật nhưng CUDA không khả dụng")
+            torch.cuda.set_device(local_rank)
+            device = f"cuda:{local_rank}"
 
         inference = DINOv3Inference(
             model_name=args.model,
-            device=args.device,
+            device=device,
             dtype=getattr(torch, args.dtype),
             normalize=not args.no_normalize,
         )
@@ -82,6 +105,11 @@ class ExtractDINOv3Command:
         )
         if not images:
             raise ValueError(f"Folder không có ảnh được hỗ trợ: {source}")
+        total_images = len(images)
+        images = images[rank::world_size]
+        if not images:
+            print(f"[GPU rank {rank}] Không có ảnh trong shard", file=sys.stderr)
+            return 0
 
         feature_root = (
             args.output.expanduser()
@@ -96,26 +124,76 @@ class ExtractDINOv3Command:
                 else Path("outputs") / f"{source.name}-maps"
             )
 
-        for index, image in enumerate(images, start=1):
-            relative = image.relative_to(source)
-            feature_path = (feature_root / relative).with_suffix(".npy")
-            map_path = (
-                (map_root / relative).with_suffix(".jpg")
-                if map_root is not None
-                else None
+        for start in range(0, len(images), args.batch_size):
+            batch = images[start : start + args.batch_size]
+            print(
+                f"[{start + 1}-{start + len(batch)}/{len(images)}] "
+                f"GPU rank {rank}: inference batch {len(batch)} ảnh",
+                file=sys.stderr,
             )
-            print(f"[{index}/{len(images)}] {relative}", file=sys.stderr)
-            cls._extract_and_save(
+            cls._extract_batch_and_save(
                 inference,
-                image,
-                feature_path=feature_path,
-                map_path=map_path,
+                images=batch,
+                source_root=source,
+                feature_root=feature_root,
+                map_root=map_root,
             )
 
-        print(f"Đã xử lý {len(images)} ảnh. Features: {feature_root}")
+        print(
+            f"GPU rank {rank} đã xử lý {len(images)}/{total_images} ảnh. "
+            f"Features: {feature_root}"
+        )
         if map_root is not None:
             print(f"Feature maps: {map_root}")
         return 0
+
+    @classmethod
+    def _extract_batch_and_save(
+        cls,
+        inference: DINOv3Inference,
+        *,
+        images: list[Path],
+        source_root: Path,
+        feature_root: Path,
+        map_root: Path | None,
+    ) -> None:
+        import numpy as np
+
+        result = inference.predict(
+            images,
+            return_patches=map_root is not None,
+            as_numpy=True,
+        )
+        if not np.isfinite(result.embeddings).all():
+            raise RuntimeError(
+                "Model trả về embedding có NaN/Inf. Hãy dùng --dtype float32 "
+                "hoặc giảm --batch-size."
+            )
+        if (
+            map_root is not None
+            and not np.isfinite(result.patch_embeddings).all()
+        ):
+            raise RuntimeError(
+                "Model trả về patch features có NaN/Inf. Hãy dùng "
+                "--dtype float32 hoặc giảm --batch-size."
+            )
+
+        for index, image in enumerate(images):
+            relative = image.relative_to(source_root)
+            feature_path = (feature_root / relative).with_suffix(".npy")
+            feature_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(feature_path, result.embeddings[index])
+            print(f"  feature: {feature_path}", file=sys.stderr)
+
+            if map_root is not None:
+                map_path = (map_root / relative).with_suffix(".jpg")
+                map_path.parent.mkdir(parents=True, exist_ok=True)
+                cls._save_feature_map(
+                    image=image,
+                    output=map_path,
+                    global_feature=result.embeddings[index],
+                    patch_features=result.patch_embeddings[index],
+                )
 
     @classmethod
     def _run_file(

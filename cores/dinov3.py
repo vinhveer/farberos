@@ -41,10 +41,11 @@ class DINOv3Inference:
         normalize: L2-normalize output features by default.
         local_files_only: Never contact the Hub; useful for offline inference.
 
-    The default ViT-7B/16 checkpoint is the largest official DINOv3 backbone.
+    The default ViT-H+/16 checkpoint is the largest practical backbone for a
+    single 16 GB inference GPU such as NVIDIA T4.
     """
 
-    DEFAULT_MODEL = "facebook/dinov3-vit7b16-pretrain-lvd1689m"
+    DEFAULT_MODEL = "facebook/dinov3-vith16plus-pretrain-lvd1689m"
 
     def __init__(
         self,
