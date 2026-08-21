@@ -70,6 +70,7 @@ class DINOv3Inference:
         self.dtype = dtype or torch.float32
         self.normalize = normalize
         model_ref = str(model_name)
+        self.model_name = model_ref
 
         self.processor = AutoImageProcessor.from_pretrained(
             model_ref, local_files_only=local_files_only

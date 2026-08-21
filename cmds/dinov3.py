@@ -55,6 +55,11 @@ class ExtractDINOv3Command:
             help="Square input resolution; must be divisible by 16 (default: 512)",
         )
         parser.add_argument(
+            "--save-patches",
+            action="store_true",
+            help="Save global and dense patch embeddings as compressed .npz files",
+        )
+        parser.add_argument(
             "--no-normalize",
             action="store_true",
             help="Do not L2-normalize the embedding",
@@ -146,6 +151,7 @@ class ExtractDINOv3Command:
                 feature_root=feature_root,
                 map_root=map_root,
                 image_size=args.image_size,
+                save_patches=args.save_patches,
             )
 
         print(
@@ -166,13 +172,14 @@ class ExtractDINOv3Command:
         feature_root: Path,
         map_root: Path | None,
         image_size: int,
+        save_patches: bool,
     ) -> None:
         import numpy as np
 
         result = inference.predict(
             images,
             image_size=image_size,
-            return_patches=map_root is not None,
+            return_patches=map_root is not None or save_patches,
             as_numpy=True,
         )
         if not np.isfinite(result.embeddings).all():
@@ -180,10 +187,9 @@ class ExtractDINOv3Command:
                 "Model trả về embedding có NaN/Inf. Hãy dùng --dtype float32 "
                 "hoặc giảm --batch-size."
             )
-        if (
-            map_root is not None
-            and not np.isfinite(result.patch_embeddings).all()
-        ):
+        if result.patch_embeddings is not None and not np.isfinite(
+            result.patch_embeddings
+        ).all():
             raise RuntimeError(
                 "Model trả về patch features có NaN/Inf. Hãy dùng "
                 "--dtype float32 hoặc giảm --batch-size."
@@ -191,9 +197,31 @@ class ExtractDINOv3Command:
 
         for index, image in enumerate(images):
             relative = image.relative_to(source_root)
-            feature_path = (feature_root / relative).with_suffix(".npy")
+            suffix = ".npz" if save_patches else ".npy"
+            feature_path = (feature_root / relative).with_suffix(suffix)
             feature_path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(feature_path, result.embeddings[index])
+            if save_patches:
+                from PIL import Image
+
+                grid_size = image_size // 16
+                with Image.open(image) as source_image:
+                    original_size = np.asarray(source_image.size, dtype=np.int32)
+                np.savez_compressed(
+                    feature_path,
+                    global_embedding=result.embeddings[index],
+                    patch_embeddings=result.patch_embeddings[index],
+                    grid_shape=np.asarray([grid_size, grid_size], dtype=np.int32),
+                    original_size=original_size,
+                    processed_size=np.asarray(
+                        [image_size, image_size], dtype=np.int32
+                    ),
+                    patch_size=np.asarray(16, dtype=np.int32),
+                    model=np.asarray(inference.model_name),
+                    normalized=np.asarray(inference.normalize),
+                    source=np.asarray(str(image)),
+                )
+            else:
+                np.save(feature_path, result.embeddings[index])
             print(f"  feature: {feature_path}", file=sys.stderr)
 
             if map_root is not None:
@@ -221,14 +249,16 @@ class ExtractDINOv3Command:
         )
         if args.output is not None:
             feature_path = args.output.expanduser()
-            if feature_path.suffix.lower() != ".npy":
-                feature_path = feature_path.with_suffix(".npy")
+            expected_suffix = ".npz" if args.save_patches else ".npy"
+            if feature_path.suffix.lower() != expected_suffix:
+                feature_path = feature_path.with_suffix(expected_suffix)
             feature = cls._extract_and_save(
                 inference,
                 image,
                 feature_path=feature_path,
                 map_path=map_path,
                 image_size=args.image_size,
+                save_patches=args.save_patches,
             )
             print(f"Đã lưu đặc trưng {feature.shape} vào: {feature_path}")
         else:
@@ -238,6 +268,7 @@ class ExtractDINOv3Command:
                 feature_path=None,
                 map_path=map_path,
                 image_size=args.image_size,
+                save_patches=args.save_patches,
             )
             print(
                 json.dumps(
@@ -263,11 +294,12 @@ class ExtractDINOv3Command:
         feature_path: Path | None,
         map_path: Path | None,
         image_size: int,
+        save_patches: bool,
     ) -> object:
         result = inference.predict(
             image,
             image_size=image_size,
-            return_patches=map_path is not None,
+            return_patches=map_path is not None or save_patches,
             as_numpy=True,
         )
         feature = result.embeddings[0]
@@ -278,14 +310,37 @@ class ExtractDINOv3Command:
                 "Model trả về embedding có NaN/Inf. Hãy chạy lại với "
                 "--dtype float32; nếu vẫn lỗi, dùng model nhỏ hơn."
             )
-        if map_path is not None and not np.isfinite(result.patch_embeddings).all():
+        if result.patch_embeddings is not None and not np.isfinite(
+            result.patch_embeddings
+        ).all():
             raise RuntimeError(
                 "Model trả về patch features có NaN/Inf. Hãy chạy lại với "
                 "--dtype float32; nếu vẫn lỗi, dùng model nhỏ hơn."
             )
         if feature_path is not None:
             feature_path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(feature_path, feature)
+            if save_patches:
+                from PIL import Image
+
+                grid_size = image_size // 16
+                with Image.open(image) as source_image:
+                    original_size = np.asarray(source_image.size, dtype=np.int32)
+                np.savez_compressed(
+                    feature_path,
+                    global_embedding=feature,
+                    patch_embeddings=result.patch_embeddings[0],
+                    grid_shape=np.asarray([grid_size, grid_size], dtype=np.int32),
+                    original_size=original_size,
+                    processed_size=np.asarray(
+                        [image_size, image_size], dtype=np.int32
+                    ),
+                    patch_size=np.asarray(16, dtype=np.int32),
+                    model=np.asarray(inference.model_name),
+                    normalized=np.asarray(inference.normalize),
+                    source=np.asarray(str(image)),
+                )
+            else:
+                np.save(feature_path, feature)
         if map_path is not None:
             map_path.parent.mkdir(parents=True, exist_ok=True)
             cls._save_feature_map(
